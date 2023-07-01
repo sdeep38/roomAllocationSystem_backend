@@ -2,13 +2,13 @@ import { db } from "../db.js"
 
 export const getRooms = (req, res) => {
 
-    const{ status } = req.params
+    const { status } = req.params
     const q = "SELECT * FROM rooms WHERE status = ?"
 
     db.query(q, status, (err, data) => {
-        if (err) {return res.json(err)}
+        if (err) return res.status(500).json({message: 'Something went wrong !', status: 'error'})
 
-        return res.status(200).json(data)
+        return res.status(200).json({message: data, status:'success'})
     })
 }
 
@@ -28,8 +28,7 @@ export const getRoom = (req, res) => {
 
 export const addRooms = (req, res) => {
 
-    //status: 0 => Vacant, status: 1 => Occupied
-
+    //status: 0 => Vacant, 1 => Occupied
     const q = "INSERT INTO rooms(block, roomno) VALUES (?)"
 
     const values = [
@@ -40,19 +39,23 @@ export const addRooms = (req, res) => {
     db.query(q, [values], (err, data) => {
         if(err) {return res.json(err)}
 
-        return res.status(200).json('Room added')
+        return res.status(201).json('New Room added')
     })
 }
 
 export const updateRoom = (req, res) => {
 
-    const q = "UPDATE rooms SET status = ? WHERE id = ?"
+    //status --> 1: allocation, 0: clear
+    const status = 1
 
-    const { id, status } = req.params
+    const [ block, room ] = req.body.roomData.split('-')
 
-    db.query(q, [status, id], (err, data) => {
-        if(err) {return res.json(err)}
+    const q = "UPDATE rooms SET status = ? WHERE block = ? AND roomno = ?"
 
-        return res.status(200).json('Room successfully alloted')
+    db.query(q, [status, block, room], (err, data) => {
+        if(err) res.status(500).json({message: 'Something went wrong !', status: 'error'})
+        
+        //if no error
+        return res.redirect('/users/updateUser/')
     })
 }
