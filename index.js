@@ -14,7 +14,7 @@ app.use(cookieParser())
 // app.method('<path>', callBack function)
 
 app.get("/test", (req,res) => {
-    res.json("This is to authenticate user")
+    res.send("This is to authenticate user")
     
 })
 
