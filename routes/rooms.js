@@ -6,7 +6,7 @@ const router = express.Router()
 
 router.get('/getRooms/:status', getRooms)
 router.get('/getRoom/:id', getRoom)
-router.put('/updateRoom/:status/:id', updateRoom)
+router.put('/updateRoom/', updateRoom)
 router.post('/addRooms', addRooms)
 
 export default router;
