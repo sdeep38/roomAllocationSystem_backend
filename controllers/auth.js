@@ -21,6 +21,7 @@ const generateRandomUserID = async(model) => {
 }
 
 const clientURL = "http://localhost:3000"
+const PRIVATE_KEY = "jwtkey"
 
 
 export const register = (req, res) => {
@@ -64,16 +65,9 @@ export const register = (req, res) => {
 //Login User
 export const login = (req, res) => {
 
-    const PRIVATE_KEY = "jwtkey"
+    const { user_type, username, password } = req.body
 
-    const q_st = "SELECT * FROM student WHERE email = ?"
-    const q_ad = "SELECT * FROM admin WHERE email = ?"
-
-    const { user_type, username } = req.body
-
-    console.log('username : ', username, 'role : ', user_type)
-
-    const q = (user_type === 'admin') ? q_ad : q_st
+    const q = `SELECT * FROM ${user_type} WHERE email = ?`
 
     db.query(q, [username], (err, data) => {
         if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'})
@@ -83,7 +77,7 @@ export const login = (req, res) => {
 
         //check correct password
         try {
-            const isPasswordCorrect = bcrypt.compareSync(req.body.password, data[0].password)
+            let isPasswordCorrect = bcrypt.compareSync(req.body.password, data[0].password)
             if (!isPasswordCorrect) return res.status(400).json({message : "Invalid credentials", status: 'error'})
         } catch (error) {
             return res.status(500).json({message : "Something went wrong !", status: 'error'})
@@ -118,75 +112,71 @@ export const logout = (req, res) => {
 
 export const forgotPassword = (req, res) => {
 
-    //generate a reset token
-    let resetToken = crypto.randomBytes(32).toString("hex");
+    const { username, user_type } = req.body
 
-    //hashing the reset token
-    const salt = bcrypt.genSaltSync(10);
-    const hashedToken = bcrypt.hashSync(resetToken, salt);
+    const q = `SELECT * FROM ${user_type} WHERE email = ?`
 
-    const q = "SELECT * FROM student WHERE email = ?"
+    db.query(q, [username], (err, data) => {
+        if (err) return res.status(500).json({message: err, status: 'error'})
 
-    db.query(q, [req.body.username], (err, data) => {
-        if (err) return res.json(err);
-        if (data.length === 0) return res.status(404).json("ERROR : No user found");
+        if (data.length === 0) return res.status(404).json({message: "No user found", status: 'error'})
 
-        const userID = data[0].id
+        //generate jwt token
+        let SECRET_KEY = PRIVATE_KEY + data[0].password
+        const resetToken = jwt.sign(
+            { id: data[0].id },
+            SECRET_KEY,   //secret key
+            {expiresIn: '5m'}   //token expiration time
+        )
 
         //creating password reset link
-        const resetLink = `${clientURL}/passwordReset?token=${resetToken}&id=${userID}`;
+        const resetLink = `${clientURL}/passwordReset/?resetToken=${resetToken}&user=${data[0].id}&role=${user_type}`
 
-        //storing token in database
-        const q_token = "INSERT INTO token(value, user_id) VALUES (?)"
-
-        const values = [
-            hashedToken,
-            userID,
-        ]
-
-        db.query(q_token, [values], (err, data) => {
-            if (err) return res.json(err);
-            
-            //reset link sent from server
-            return res.status(200).json({link: resetLink})
-    
-        })
+        return res.status(200).json({message: 'A verification link has been sent to your email', link: resetLink, status: 'success'})
     })
 }
 
-export const resetPassword = async (req, res) => {
-    const userToken = req.body.token
-    const userID = req.body.id
+export const resetPassword = (req, res) => {
+    
+    const { password, token, user, role} = req.body
 
-    const q_token = "SELECT * FROM token WHERE user_id = ?"
+    const q = `SELECT * FROM ${role} WHERE id = ?`
 
-    db.query(q_token, [userID], (err, data) => {
-        if (err) return res.json(err);
+    db.query(q, [user], (err, data) => {
+        if (err) return res.status(500).json({message: 'Something went wrong !', status: 'error'})
 
-        //check if token exists
-        if (data.length === 0) return res.status(404).json("ERROR : Please try after sometime");
+        //check if user exists
+        if (data.length === 0) return res.status(404).json({message: "No user found", status: 'error'})
 
-        //check correct password
-        const isTokenValid = bcrypt.compareSync(userToken, data[0].value)
-        
-        console.log('token : ', userToken, 'isvalid : ', isTokenValid)
+        //decrypt token
+        try {
+            if(token) {
+                let verified_user = jwt.verify(token, PRIVATE_KEY + data[0].password)
+                // console.log('token user : ', verified_user, 'requesting user : ', user)
+            }
+            else {
+                return res.status(401).json({message: 'Unauthorized User', status: 'error'})
+            }
+        } catch (error) {
+            let messageText = (error.name === 'TokenExpiredError') ? {code: 408, label: 'Session expired'} : {code: 400, label: 'Authentication error'}
+            return res.status(messageText.code).json({message: messageText.label, status: 'error'})
+        }
 
-        if (!isTokenValid) return res.status(409).json("Invalid Token")
 
         //hash the new password and store in database
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(req.body.password, salt);
+        const salt = bcrypt.genSaltSync(10)
+        const hash = bcrypt.hashSync(password, salt)
 
-        const q_st = "UPDATE student SET password = ? WHERE id = ?"
+        const q = `UPDATE ${role} SET password = ? WHERE id = ?`
 
         const values = [
             hash,
-            userID,
+            user,
         ]
         
-        db.query(q_st, values, (err, data) => {
-            if (err) return res.json(err);
-            return res.status(200).json('Your password has been successfully changed');
+        db.query(q, values, (err, data) => {
+            if (err) return res.status(200).json({message: 'Something went wrong !', status: 'error'})
+            return res.status(200).json({message: 'Your password has been successfully changed', status: 'success'})
         })
 
     })
@@ -194,37 +184,40 @@ export const resetPassword = async (req, res) => {
 }
 
 export const changePassword = async (req, res) => {
-    const { userId, password0, password1 } = req.body
+    const { password0, password1 } = req.body
+    const { role } = req.query
+    
+    const q = `SELECT * FROM ${role} WHERE id = ?`
+    
+    db.query(q, [req.userID], (err, data) => {
+        if (err) return res.status(500).json({message: 'Something went wrong !', status: 'error'});
 
-    const q = "SELECT * FROM student WHERE roll = ?"
-
-    db.query(q, [userId], (err, data) => {
-        if (err) return res.json(err);
-
-        //check if token exists
-        if (data.length === 0) return res.status(404).json({status: 'error', statusCode: 404, message : "ERROR : User does not exist"});
-
-        //check correct password
-        const isUserValid = bcrypt.compareSync(password0, data[0].password)
+        //check if user exists
+        if (data.length === 0) return res.status(404).json({status: 'error', message : "User does not exist"});
         
-        console.log('userid : ', userId, 'isvalid : ', isUserValid, 'password0 : ', password0, 'password1 : ', password1)
-
-        if (!isUserValid) return res.status(409).json({status: 'error', statusCode: 409, message : "ERROR : Incorrect credentials"})
-
+        //check correct password
+        try {
+            let isUserValid = bcrypt.compareSync(password0, data[0].password)
+            if (!isUserValid) return res.status(409).json({status: 'error', message : "Incorrect credentials"})
+        } catch (error) {
+            return res.status(500).json({message : "Something went wrong !", status: 'error'})
+        }
+        
+        // console.log('userid : ', req.userID, 'password0 : ', password0, 'password1 : ', password1)
+        
         //hash the new password and store in database
         const salt = bcrypt.genSaltSync(10);
         const hash = bcrypt.hashSync(password1, salt);
-
-        const q_st = "UPDATE student SET password = ? WHERE id = ?"
-
+        
+        const q = `UPDATE ${role} SET password = ? WHERE id = ?`
+        
         const values = [
             hash,
             data[0].id,
         ]
-
-        db.query(q_st, values, (err, data) => {
-            if (err) return res.json(err);
-            return res.status(200).json({status: 'success', statusCode: 209, message : "Your password has been successfully changed"});
+        db.query(q, values, (err, data) => {
+            if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'});
+            return res.status(200).json({status: 'success', message : "Password successfully updated"});
         })
 
     })
