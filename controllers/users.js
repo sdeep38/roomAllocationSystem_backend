@@ -1,33 +1,52 @@
-import { db } from "../db.js"
+import { pool } from "../db.js"
 
-export const getAllUsers = (req, res) => {
-    const q = "SELECT name, roll, phone, block, room, email FROM student"
+export const getAllUsers = async (req, res) => {
+    let users = [];
+    try {  
+        // fetch students
+        const [studentRows] = await pool.execute(`SELECT s.student_id AS id, s.email, s.name, s.phone, 'student' AS role FROM student s`);
+        
+        // fetch admins
+        const [adminRows] = await pool.execute(`SELECT a.admin_id AS id, a.email, a.name, a.phone, 'admin' AS role FROM admin a`);
 
-    db.query(q, (err, data) => {
-        if (err) return res.send(err)
+        users = [...studentRows, ...adminRows];
 
-        return res.status(200).json(data)
-    })
+        return res.status(200).json(users);
+    } catch (err) {
+        console.log(err);
+        return res.status(500).json({ message: "Something went wrong", status: "error" });
+    }
 }
 
-export const getNotAllocatedUsers = (req, res) => {
-    const q = "SELECT name, roll, phone, email FROM student WHERE block IS NULL"
+// fixed 14/12/25
+export const getUnAllocatedUsers = async (req, res) => {
+    try {
+        const [rows] = await pool.execute(`SELECT s.roll, s.email, s.name, s.phone FROM student s
+            WHERE NOT EXISTS (
+            SELECT 1 FROM allocations a
+            WHERE a.student_id = s.student_id AND a.status = 'active'
+        )`);
 
-    db.query(q, (err, data) => {
-        if (err) return res.status(500).json({message: err, status: 'error'});
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "No unallocated students found", status: "not_found" });
+        }
 
-        return res.status(200).json({message: data, status: 'success'})
-    })
+        return res.status(200).json(rows);
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Something went wrong", status: "error" });
+    }
 }
 
-export const getAllocatedUsers = (req, res) => {
-    const q = "SELECT (name, roll, phone, block, room, email) FROM student WHERE block IS NOT NULL"
-
-    db.query(q, (err, data) => {
-        if (err) return res.send(err)
-
-        return res.status(200).json({dataSet : data, status: 'success'})
-    })
+// fixed 13/12/25
+export const getAllocatedUsers = async (req, res) => {
+    try {
+        const [rows] = await db.query("SELECT name, roll, phone, block, room, email FROM student WHERE block IS NOT NULL");
+        return res.status(200).json(rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Something went wrong", status: "error" });
+    }
 }
 
 export const getUser = (req, res) => {
@@ -38,53 +57,42 @@ export const getUser = (req, res) => {
     const q = `SELECT * FROM ${role} WHERE id = ?`
 
     db.query(q, u_id, (err, data) => {
-        if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'})
+        if (err) return res.status(500).json({ message: "Something went wrong !", status: 'error' })
 
-        if(data.length === 0) return res.status(404).json({message : "User does not exist", status: 'error'})
+        if (data.length === 0) return res.status(404).json({ message: "User does not exist", status: 'error' })
 
-        const { id, password, ...other} = data[0]
+        const { id, password, ...other } = data[0]
 
-        return res.status(200).json({dataSet : other, status: 'success'})
+        return res.status(200).json({ dataSet: other, status: 'success' })
     })
 }
 
-export const updateUser = (req, res) => {
+// fixed 14/12/25
+export const updateUser = async (req, res) => {
+    try {
+        const u_id = req.user_id;
+        const role = req.user_role;
+        const { field, contact } = req.body;
 
-    const u_id = req.userID
+        // validate role to prevent SQL injection
+        const allowedRoles = ['student', 'admin'];
+        if (!allowedRoles.includes(role)) {
+            return res.status(400).json({ message: 'Invalid role', status: 'error' });
+        }
 
-    const { field } = req.body
-    const { role } = req.query
+        if (field === 'contact') {
+            console.log("role->", role, "phone->", contact, "user->", u_id);
+            const [result] = await pool.execute(`UPDATE ${role} SET phone = ? WHERE ${role}_id = ?`, [contact.trim(), u_id]);
 
-    if (field == 'contact') {
-    
-        const q = `UPDATE ${role} SET phone = ? WHERE id = ?`
-    
-        db.query(q_st, [req.body.contact, req.userID], (err, data) => {
-            if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'})
-    
-            return res.status(200).json({message: "Profile successfully updated", status: 'success'})
-        })
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ message: 'User not found', status: 'not_found' });
+            }
+
+            return res.status(200).json({ message: 'Profile successfully updated', status: 'success' });
+
+        }
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Something went wrong!', status: 'error' });
     }
-    if (field == 'room'){
-
-        const [ block, room ] = req.body.roomData.split('-')
-        const { studentData } = req.body
-
-        const values = [
-            room,
-            block,
-            studentData
-        ]
-    
-        const q = "UPDATE student SET room = ?, block = ? WHERE roll = ?"
-
-        db.query(q, values, (err, data) => {
-            if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'})
-    
-            return res.status(200).json({message: "Room successfully alloted", status: 'success'})
-        })
-
-    }
-    
-
-    }
+}
