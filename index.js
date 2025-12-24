@@ -3,7 +3,7 @@ import authRoutes from "./routes/auth.js";
 import userRoutes from "./routes/users.js";
 import roomRoutes from "./routes/rooms.js";
 import cookieParser from "cookie-parser"
-import { db } from "./db.js";
+import { pool } from "./db.js";
 
 const app = express()
 
