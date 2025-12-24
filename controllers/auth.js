@@ -1,11 +1,11 @@
 import { json } from "express"
-import { db } from "../db.js"
+import { pool } from "../db.js"
 import bcrypt from "bcryptjs"
 import jwt from "jsonwebtoken"
 import crypto from "crypto"
 
 //Register User
-const generateRandomUserID = async(model) => {
+const generateRandomUserID = async (model) => {
     var flag = 1;
     while (flag) {
         const randomId = crypto.randomBytes(5).toString('hex')
@@ -13,213 +13,322 @@ const generateRandomUserID = async(model) => {
         const q = `SELECT * FROM ${model} WHERE id = ?`
         db.query(q, randomId, (err, data) => {
             if (err) console.log(err);
-            if(data.length === 0){flag = 0}
+            if (data.length === 0) { flag = 0 }
         })
     }
 
     return randomId
 }
 
-const clientURL = "http://localhost:3000"
-const PRIVATE_KEY = "jwtkey"
+const clientURL = "http://localhost:3000";
+const PRIVATE_KEY = "jwtkey";
 
 
-export const register = (req, res) => {
+export const register = async (req, res) => {
 
-    const q = "SELECT * FROM student WHERE email = ?"
+    try {
+        const { email, password, name, roll, phone, position, role } = req.body;
 
-    const { email, password, name, roll, phone } = req.body
+        // Check if user already exists (search both tables if needed)
+        const [existingStudent] = await db.query("SELECT * FROM student WHERE email = ?", [email]);
+        const [existingAdmin] = await db.query("SELECT * FROM admin WHERE email = ?", [email]);
 
-    db.query(q, [email], (err, data) => {
-        if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'});
-        
-        //checks existing user
-        if (data.length) return res.status(409).json({message : "User already exists", status: 'error'});
+        if (existingStudent.length || existingAdmin.length) {
+            return res.status(409).json({ message: "User already exists", status: "error" });
+        }
 
         //hash the password
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(password, salt);
+        const hash = bcrypt.hash(password, 10); // asynchronous method
 
-        //insert user into table
-        const q_ad = "INSERT INTO admin(name, phone, position, password, email) VALUES (?)"
-        const q_st = "INSERT INTO student(name, roll, phone, password, email) VALUES (?)"
+        // Insert based on role
+        if (role === "student") {
+            const values = [name, roll, phone, hash, email];
+            await db.query(
+                "INSERT INTO student(name, roll, phone, password, email) VALUES (?)",
+                [values]
+            );
+            return res.status(201).json({ message: "Student Created", status: "success" });
 
-        const values = [
-            name,
-            roll,
-            phone,
-            hash,
-            email,
-        ]
+        } else if (role === "admin") {
+            const values = [name, phone, position, hash, email];
+            await db.query(
+                "INSERT INTO admin(name, phone, position, password, email) VALUES (?)",
+                [values]
+            );
+            return res.status(201).json({ message: "Admin Created", status: "success" });
 
-        db.query(q_st, [values], (err, data) => {
-            if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'});
-
-            return res.status(201).json({message : "Student Created", status: 'success'});
-        })
-
-    })
+        } else {
+            return res.status(400).json({ message: "Invalid role specified", status: "error" });
+        }
+    } catch (error) {
+        console.log(error);
+        return res.status(500).json({ message: "Something went wrong !", status: "error" });
+    }
 }
 
 
 //Login User
-export const login = (req, res) => {
+export const login = async (req, res) => {
+    try {
+        const { user_type, username, password } = req.body;
 
-    const { user_type, username, password } = req.body
-
-    const q = `SELECT * FROM ${user_type} WHERE email = ?`
-
-    db.query(q, [username], (err, data) => {
-        if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'})
-
-        //check if user does not exist
-        if (data.length === 0) return res.status(404).json({message : "No user found", status: 'error'});
-
-        //check correct password
-        try {
-            let isPasswordCorrect = bcrypt.compareSync(req.body.password, data[0].password)
-            if (!isPasswordCorrect) return res.status(400).json({message : "Invalid credentials", status: 'error'})
-        } catch (error) {
-            return res.status(500).json({message : "Something went wrong !", status: 'error'})
+        // Whitelist user_type
+        const allowedTypes = ["student", "admin"];
+        if (!allowedTypes.includes(user_type)) {
+            return res.status(400).json({ message: "Invalid user type", status: "error" });
         }
 
-        //generate jwt token
-        const token = jwt.sign(
-            { id: data[0].id },
-            PRIVATE_KEY   //secret key
-        )
+        // Query user
+        const [rows] = await pool.execute(`SELECT * FROM ${user_type} WHERE email = ?`, [username]);
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "No user found", status: "error" });
+        }
 
-        const { id, password, ...other } = data[0]
+        const user = rows[0];
 
-        res.cookie("access_token", token, {
-            httpOnly: true
-        }).status(200).json({ isuserloggedin: true, authorizedAs: user_type, username: data[0].name })
+        // Check password
+        const isPasswordCorrect = await bcrypt.compare(password, user.password);    // asynchronous method
+        if (!isPasswordCorrect) {
+            return res.status(400).json({ message: "Invalid credentials", status: "error" });
+        }
 
-    })
+        // Generate JWT
+        const user_id = user_type === 'admin' ? user.admin_id : user.student_id;
+        const payload = { id: user_id, role: user_type };
+
+        const accessToken = jwt.sign(
+            payload, // include role for future auth
+            PRIVATE_KEY,
+            { expiresIn: "1h" } // optional expiry
+        );
+        // const refreshToken = jwt.sign(
+        //     payload,
+        //     PRIVATE_KEY,
+        //     { expiresIn: "7d" } // long-lived
+        // );
+
+        // Store refresh token in DB (optional, for revocation)
+        // await pool.execute(
+        //     "INSERT INTO token (value, user_id, user_type, expires_at) VALUES (?, ?, ?, ?)",
+        //     [refreshToken, user_id, user_type, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]
+        // );
+
+        // Remove sensitive fields
+        const { password: _, ...safeUser } = user;
+
+        // Send cookie + response
+        res.cookie("access_token", accessToken, {
+            httpOnly: true,
+            secure: true,       // only over HTTPS
+            sameSite: "strict", // CSRF protection
+            maxAge: 60 * 60 * 1000, // 60 minutes
+        }).status(200).json({
+            isUserLoggedIn: true,
+            authorizedAs: user_type,
+            username: user.name,
+            user: safeUser,
+        });
+        // .cookie("refresh_token", refreshToken, {
+        //     httpOnly: true,
+        //     secure: true,       // only over HTTPS
+        //     sameSite: "strict", // CSRF protection
+        //     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        // })
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Something went wrong!", status: "error" });
+    }
 
 }
 
-//Logout User
-export const logout = (req, res) => {
+//Logout User 
+export const logout = async (req, res) => {
+    try {
+        const refreshToken = req.cookies.refresh_token;
 
-    res.clearCookie("access_token", {
-        sameSite: "none",
-        secure: true
-    }).status(200).json({message : "User has been logged out", status: 'success'})
+        if (refreshToken) {
+            // Mark refresh token as used/revoked in DB
+            await pool.execute("UPDATE token SET used = 1 WHERE value = ?", [refreshToken]);
+        }
+
+        // Clear the cookies
+        res.clearCookie("access_token", {
+            httpOnly: true,   // match login cookie
+            secure: true,     // only over HTTPS
+            sameSite: "strict" // CSRF protection
+        }).clearCookie("refresh_token", {
+            httpOnly: true,
+            secure: true,
+            sameSite: "strict",
+        });
+
+        return res.status(200).json({
+            message: "User has been logged out",
+            status: "success"
+        });
+
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Something went wrong!", status: "error" });
+    }
 }
 
+export const forgotPassword = async (req, res) => {
 
+    try {
+        const { username, user_type } = req.body;
 
-export const forgotPassword = (req, res) => {
+        // Whitelist user_type
+        const allowedTypes = ["student", "admin"];
+        if (!allowedTypes.includes(user_type)) {
+            return res.status(400).json({ message: "Invalid user type", status: "error" });
+        }
 
-    const { username, user_type } = req.body
+        // Query user
+        const [rows] = await pool.execute(`SELECT * FROM ${user_type} WHERE email = ?`, [username]);
+        if (rows.length === 0) {
+            return res.status(404).json({ message: "No user found", status: "error" });
+        }
 
-    const q = `SELECT * FROM ${user_type} WHERE email = ?`
+        const user = rows[0];
 
-    db.query(q, [username], (err, data) => {
-        if (err) return res.status(500).json({message: err, status: 'error'})
-
-        if (data.length === 0) return res.status(404).json({message: "No user found", status: 'error'})
-
-        //generate jwt token
-        let SECRET_KEY = PRIVATE_KEY + data[0].password
+        // Generate reset token (short-lived)
+        const user_id = user_type === 'admin' ? user.admin_id : user.student_id;
+        let RESET_SECRET = PRIVATE_KEY;
         const resetToken = jwt.sign(
-            { id: data[0].id },
-            SECRET_KEY,   //secret key
-            {expiresIn: '5m'}   //token expiration time
-        )
+            { id: user_id, role: user_type },
+            RESET_SECRET,   // use a dedicated secret
+            { expiresIn: "15m" }        // short expiry
+        );
+
+        // Calculate expiry timestamp
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+        // Store token in DB
+        await pool.execute(
+            `INSERT INTO token (value, user_id, user_type, expires_at) VALUES (?, ?, ?, ?)`,
+            [resetToken, user_id, user_type, expiresAt]
+        );
 
         //creating password reset link
-        const resetLink = `${clientURL}/passwordReset/?resetToken=${resetToken}&user=${data[0].id}&role=${user_type}`
+        const resetLink = `${clientURL}/passwordReset/?resetToken=${resetToken}`;
+        return res.status(200).json({
+            link: resetLink,
+            message: "A verification link has been sent to your email",
+            status: "success"
+        });
 
-        return res.status(200).json({message: 'A verification link has been sent to your email', link: resetLink, status: 'success'})
-    })
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Something went wrong!", status: "error" });
+    }
+
 }
 
-export const resetPassword = (req, res) => {
-    
-    const { password, token, user, role} = req.body
+export const resetPassword = async (req, res) => {
+    const connection = await pool.getConnection(); // get a dedicated connection
+    try {
+        const { newPassword, resetToken } = req.body;
 
-    const q = `SELECT * FROM ${role} WHERE id = ?`
-
-    db.query(q, [user], (err, data) => {
-        if (err) return res.status(500).json({message: 'Something went wrong !', status: 'error'})
-
-        //check if user exists
-        if (data.length === 0) return res.status(404).json({message: "No user found", status: 'error'})
-
-        //decrypt token
-        try {
-            if(token) {
-                let verified_user = jwt.verify(token, PRIVATE_KEY + data[0].password)
-                // console.log('token user : ', verified_user, 'requesting user : ', user)
-            }
-            else {
-                return res.status(401).json({message: 'Unauthorized User', status: 'error'})
-            }
-        } catch (error) {
-            let messageText = (error.name === 'TokenExpiredError') ? {code: 408, label: 'Session expired'} : {code: 400, label: 'Authentication error'}
-            return res.status(messageText.code).json({message: messageText.label, status: 'error'})
+        if (!resetToken || !newPassword) {
+            return res.status(400).json({ message: "Invalid session or password", status: "error" });
         }
 
+        // Verify token
+        let decoded;
+        try {
+            decoded = jwt.verify(resetToken, PRIVATE_KEY);
+        } catch (err) {
+            return res.status(400).json({ message: "Invalid or expired session", status: "error" });
+        }
 
-        //hash the new password and store in database
-        const salt = bcrypt.genSaltSync(10)
-        const hash = bcrypt.hashSync(password, salt)
+        const { id: user_id, role: user_type } = decoded;
 
-        const q = `UPDATE ${role} SET password = ? WHERE id = ?`
+        // Whitelist role
+        const allowedTypes = ["student", "admin"];
+        if (!allowedTypes.includes(user_type)) {
+            return res.status(400).json({ message: "Invalid role", status: "error" });
+        }
 
-        const values = [
-            hash,
-            user,
-        ]
-        
-        db.query(q, values, (err, data) => {
-            if (err) return res.status(200).json({message: 'Something went wrong !', status: 'error'})
-            return res.status(200).json({message: 'Your password has been successfully changed', status: 'success'})
-        })
+        // Start transaction
+        await connection.beginTransaction();
 
-    })
+        // Check token in DB
+        const [rows] = await pool.execute(
+            "SELECT * FROM token WHERE value = ? AND user_id = ? AND used = 0",
+            [resetToken, user_id]
+        );
 
-}
+        if (rows.length === 0) {
+            return res.status(400).json({ message: "Invalid Session", status: "error" });
+        }
+
+        // Check if token expired
+        const tokenRow = rows[0];
+        if (new Date(tokenRow.expires_at) < new Date()) {
+            await connection.rollback();
+            return res.status(400).json({ message: "Session expired", status: "error" });
+        }
+
+        // Hash new password
+        const hash = await bcrypt.hash(newPassword, 10);
+
+        // Update password in DB
+        await pool.execute(`UPDATE ${user_type} SET password = ? WHERE ${user_type}_id = ?`, [hash, user_id]);
+
+        // Mark token as used
+        await pool.execute("UPDATE token SET used = 1 WHERE token_id = ?", [tokenRow.token_id]);
+
+        // Commit transaction
+        await connection.commit();
+
+        return res.status(200).json({ message: "Password has been reset successfully", status: "success" });
+    } catch (err) {
+        console.error(err);
+        await connection.rollback();
+        return res.status(500).json({ message: "Something went wrong!", status: "error" });
+    } finally {
+        connection.release();   // release connection back to pool
+    }
+};
 
 export const changePassword = async (req, res) => {
-    const { password0, password1 } = req.body
-    const { role } = req.query
-    
-    const q = `SELECT * FROM ${role} WHERE id = ?`
-    
-    db.query(q, [req.userID], (err, data) => {
-        if (err) return res.status(500).json({message: 'Something went wrong !', status: 'error'});
+    try {
+        const { password0, password1 } = req.body;
+
+        const user = req.user_id;
+        const role = req.user_role;
+
+        // Whitelist role
+        const allowedTypes = ["student", "admin"];
+        if (!allowedTypes.includes(role)) {
+            return res.status(400).json({ message: "Invalid role", status: "error" });
+        }
 
         //check if user exists
-        if (data.length === 0) return res.status(404).json({status: 'error', message : "User does not exist"});
-        
-        //check correct password
-        try {
-            let isUserValid = bcrypt.compareSync(password0, data[0].password)
-            if (!isUserValid) return res.status(409).json({status: 'error', message : "Incorrect credentials"})
-        } catch (error) {
-            return res.status(500).json({message : "Something went wrong !", status: 'error'})
+        const [rows] = await pool.execute(`SELECT password FROM ${role} WHERE ${role}_id = ?`, [user]);
+        if (rows.length === 0) {
+            return res.status(404).json({ status: 'error', message: "User not found" });
         }
-        
-        // console.log('userid : ', req.userID, 'password0 : ', password0, 'password1 : ', password1)
-        
-        //hash the new password and store in database
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(password1, salt);
-        
-        const q = `UPDATE ${role} SET password = ? WHERE id = ?`
-        
-        const values = [
-            hash,
-            data[0].id,
-        ]
-        db.query(q, values, (err, data) => {
-            if (err) return res.status(500).json({message : "Something went wrong !", status: 'error'});
-            return res.status(200).json({status: 'success', message : "Password successfully updated"});
-        })
 
-    })
+        const oldPasswordHash = rows[0].password;
+
+        // Compare old password
+        const isUserValid = await bcrypt.compare(password0, oldPasswordHash);
+        if (!isUserValid) {
+            return res.status(409).json({ status: 'error', message: "Incorrect credentials" });
+        }
+
+        // hash the new password
+        const newHash = await bcrypt.hash(password1, 10);
+
+        // Update password
+        await pool.execute(`UPDATE ${role} SET password = ? WHERE ${role}_id = ?`, [newHash, user]);
+
+        return res.status(200).json({ status: 'success', message: "Password successfully updated" });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({ message: "Something went wrong !", status: 'error' });
+    }
 
 }
